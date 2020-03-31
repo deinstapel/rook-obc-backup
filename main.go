@@ -4,20 +4,20 @@ import (
   "context"
   "io/ioutil"
   "os"
+  "os/signal"
+  "syscall"
   "fmt"
   log "github.com/sirupsen/logrus"
   "github.com/ericchiang/k8s"
   "github.com/ghodss/yaml"
   corev1 "github.com/ericchiang/k8s/apis/core/v1"
 )
-var eg SignalledErrGroup
 var client *k8s.Client
 
 func init() {
   log.SetFormatter(&log.TextFormatter{})
   log.SetOutput(os.Stderr)
   log.SetLevel(log.TraceLevel)
-  eg = buildErrGroup(context.Background())
   c, err := makeClient()
   if err != nil {
     log.WithField("err", err).Fatal("Failed to create cluster client")
@@ -54,12 +54,20 @@ func main() {
     log.WithField("err", err).Fatal("Failed to setup remote s3 server")
     os.Exit(1)
   }
-  eg.Go(backupOBCs)
+  
+  ctx, cancel := context.WithCancel(context.Background())
+  go func() {
+    signalChannel := make(chan os.Signal, 1)
+		signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM)
+    <-signalChannel
+    cancel()
+  }()
 
-  if err := eg.Wait(); err != nil {
+  if err := backupOBCs(ctx); err != nil {
     log.WithField("err", err).Fatal("Backup failed")
     os.Exit(1)
   }
+  os.Exit(0)
 }
 
 func backupOBCs(ctx context.Context) error {

@@ -1,1 +1,8 @@
 rook-obc-backup
+
+*_kubeconfig
+
+.vscode
+.idea
+
+IGNORE_*

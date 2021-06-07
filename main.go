@@ -1,29 +1,26 @@
 package main
 
 import (
-  "context"
-  "io/ioutil"
-  "os"
-  "os/signal"
-  "syscall"
-  "fmt"
-  log "github.com/sirupsen/logrus"
-  "github.com/ericchiang/k8s"
-  "github.com/ghodss/yaml"
-  corev1 "github.com/ericchiang/k8s/apis/core/v1"
+	"context"
+	"errors"
+	"fmt"
+	"github.com/deinstapel/rook-obc-backup/env"
+	"github.com/deinstapel/rook-obc-backup/kubernetes"
+	"github.com/deinstapel/rook-obc-backup/sync"
+	"github.com/ericchiang/k8s"
+	"github.com/ghodss/yaml"
+	log "github.com/sirupsen/logrus"
+	"io/ioutil"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
-var client *k8s.Client
 
 func init() {
-  log.SetFormatter(&log.TextFormatter{})
-  log.SetOutput(os.Stderr)
-  log.SetLevel(log.TraceLevel)
-  c, err := makeClient()
-  if err != nil {
-    log.WithField("err", err).Fatal("Failed to create cluster client")
-    os.Exit(1)
-  }
-  client = c
+	log.SetFormatter(&log.TextFormatter{})
+	log.SetOutput(os.Stderr)
+	log.SetLevel(log.TraceLevel)
 }
 
 func makeKubeconfigClient(path string) (*k8s.Client, error) {
@@ -42,88 +39,161 @@ func makeKubeconfigClient(path string) (*k8s.Client, error) {
 	return client, nil
 }
 
-func makeClient() (*k8s.Client, error) {
-	if kubeconfig := os.Getenv("KUBECONFIG"); kubeconfig != "" {
-		return makeKubeconfigClient(kubeconfig)
+func makeClient(path string) (*k8s.Client, error) {
+	if path != "" {
+		return makeKubeconfigClient(path)
 	}
 	return k8s.NewInClusterClient()
 }
 
-func main() {
-  if err := setupMinioRemote(); err != nil {
-    log.WithField("err", err).Fatal("Failed to setup remote s3 server")
-    os.Exit(1)
-  }
-  
-  ctx, cancel := context.WithCancel(context.Background())
-  go func() {
-    signalChannel := make(chan os.Signal, 1)
-		signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM)
-    <-signalChannel
-    cancel()
-  }()
-
-  if err := backupOBCs(ctx); err != nil {
-    log.WithField("err", err).Fatal("Backup failed")
-    os.Exit(1)
-  }
-  os.Exit(0)
+func handleMainError(err error) {
+	if err != nil {
+		log.Error(err)
+		panic(err)
+	}
 }
 
-func backupOBCs(ctx context.Context) error {
-  log.Trace("start crd watch")
-  crdList := &ObjectBucketClaimList{}
-  if err := client.List(ctx, k8s.AllNamespaces, crdList); err != nil {
-    log.WithField("err", err).Warning("Failed to list OBCs")
-    return err
-  }
+func main() {
 
-  var failedBuckets []string
+	readEnv := env.ReadEnv()
 
-  for index := range crdList.Items {
-    item := crdList.Items[index]
-    scopedLog := log.WithFields(log.Fields{
-      "claim": *item.Metadata.Name,
-      "namespace": *item.Metadata.Namespace,
-    })
-    scopedLog.Trace("fetch creds");
+	sourceClient, err := makeClient(readEnv.SOURCE_KUBECONFIG)
+	handleMainError(err)
+	targetClient, err := makeClient(readEnv.TARGET_KUBECONFIG)
+	handleMainError(err)
 
-    cm := &corev1.ConfigMap{}
-    sec := &corev1.Secret{}
-    if err := client.Get(ctx, *item.Metadata.Namespace, *item.Metadata.Name, cm); err != nil {
-      failedBuckets = append(failedBuckets, *item.Metadata.Name)
-      continue
-    }
-    if err := client.Get(ctx, *item.Metadata.Namespace, *item.Metadata.Name, sec); err != nil {
-      scopedLog.WithField("err", err).Warning("secret get failed")
-      failedBuckets = append(failedBuckets, *item.Metadata.Name)
-      continue
-    }
-    minioHostName := fmt.Sprintf("%s-%s", *item.Metadata.Namespace, *item.Metadata.Name)
-    cmData := cm.GetData()
-    secData := sec.GetData()
-    proto := "http"
-    if cmData["BUCKET_SSL"] == "true" {
-      proto = "https"
-    }
-    minioHostURL := fmt.Sprintf("%s://%s:%s", proto, cmData["BUCKET_HOST"], cmData["BUCKET_PORT"])
-    if localURL, ok := os.LookupEnv("LOCAL_S3_URL"); ok {
-      minioHostURL = localURL
-    }
-    if err := addMinioHost(minioHostName, minioHostURL, string(secData["AWS_ACCESS_KEY_ID"]), string(secData["AWS_SECRET_ACCESS_KEY"])); err != nil {
-      scopedLog.WithField("err", err).Warning("Failed to set minio host")
-      failedBuckets = append(failedBuckets, *item.Metadata.Name)
-      continue
-    }
-    if err := mirrorBucket(minioHostName, cmData["BUCKET_NAME"], minioHostName); err != nil {
-      scopedLog.WithField("err", err).Warning("Failed to mirror bucket")
-      failedBuckets = append(failedBuckets, *item.Metadata.Name)
-      continue
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		signalChannel := make(chan os.Signal, 1)
+		signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM)
+		<-signalChannel
+		cancel()
+	}()
 
-    }
-  }
-  if len(failedBuckets) > 0 {
-    return fmt.Errorf("Backup for buckets %v failed", failedBuckets)
-  }
-  return nil
+	if err := backupOBCs(ctx, sourceClient, targetClient, readEnv); err != nil {
+		log.WithField("err", err).Fatal("Backup failed")
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func backupOBCs(ctx context.Context, sourceClient, targetClient *k8s.Client, env env.Environment) error {
+	log.Trace("start crd watch")
+
+	crdList := &kubernetes.ObjectBucketClaimList{}
+	if err := sourceClient.List(ctx, k8s.AllNamespaces, crdList); err != nil {
+		log.WithField("err", err).Warning("Failed to list OBCs")
+		return err
+	}
+
+	var failedBuckets []string
+
+	for index := range crdList.Items {
+		item := crdList.Items[index]
+		err := backupOBC(ctx, item, sourceClient, targetClient, env)
+
+		if err != nil {
+			log.WithFields(log.Fields{"name": *item.Metadata.Name, "namespace": *item.Metadata.Namespace}).Error(err)
+			failedBuckets = append(failedBuckets, *item.Metadata.Name)
+			continue
+		}
+
+	}
+
+	if len(failedBuckets) > 0 {
+		return fmt.Errorf("OBCs %v failed", failedBuckets)
+	}
+	return nil
+}
+
+func backupOBC(ctx context.Context, objectBucketClaim kubernetes.ObjectBucketClaim, sourceClient, targetClient *k8s.Client, env env.Environment) error {
+
+	item := objectBucketClaim
+
+	targetBucketName := env.TARGET_BUCKET_PREFIX + "-" + *item.Metadata.Namespace + "-" + *item.Metadata.Name
+
+	scopedLog := log.WithFields(log.Fields{
+		"sourceName":      *item.Metadata.Name,
+		"sourceNamespace": *item.Metadata.Namespace,
+		"targetName": targetBucketName,
+		"targetNamespace": env.TARGET_BUCKET_NAMESPACE,
+	})
+	scopedLog.Info("Working on Element")
+
+	childCtx, cancelChildCtx := context.WithCancel(ctx)
+	defer cancelChildCtx()
+
+	sourceDetails, err := kubernetes.GetDetails(
+		sourceClient,
+		childCtx,
+		*item.Metadata.Namespace,
+		*item.Metadata.Name,
+	)
+	if err != nil {
+		log.Errorf("sourceDetails could not be obtained, err: %v", err)
+		return errors.New("sourceDetails could not be obtained")
+	}
+
+	doesTargetNamespaceExist, err := kubernetes.DoesExist(
+		targetClient,
+		childCtx,
+		env.TARGET_BUCKET_NAMESPACE,
+		targetBucketName,
+	)
+
+	if err != nil {
+		return errors.New("Target namespace could not be checked")
+	}
+
+	if !doesTargetNamespaceExist {
+		err := kubernetes.CreateOBC(
+			targetClient,
+			childCtx,
+			env.TARGET_BUCKET_NAMESPACE,
+			targetBucketName,
+			env.TARGET_STORAGE_CLASS_NAME,
+		)
+
+		if err != nil {
+			log.Errorf("Target object bucket claim could not be created, err: %v", err)
+			return errors.New("Target object bucket claim could not be created")
+		}
+
+		time.Sleep(10 * time.Second)
+	}
+
+	targetDetails, err := kubernetes.GetDetails(
+		targetClient,
+		childCtx,
+		env.TARGET_BUCKET_NAMESPACE,
+		targetBucketName,
+	)
+
+	if err != nil {
+		return errors.New("targetDetails could not be obtained")
+	}
+
+	syncGroup, err := sync.PrepareSyncGroup(
+		childCtx,
+		sourceDetails,
+		env.SOURCE_S3_URL,
+		targetDetails,
+		env.TARGET_S3_URL,
+	)
+
+	if err != nil {
+		return errors.New("Sync Group could not be prepared")
+	}
+
+	err = sync.RunSyncGroup(
+		childCtx,
+		targetBucketName,
+		syncGroup,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

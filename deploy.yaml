@@ -16,7 +16,7 @@ rules:
   verbs: ["get"]
 - apiGroups: ["objectbucket.io"]
   resources: ["objectbucketclaims"]
-  verbs: ["get", "list"]
+  verbs: ["get", "list", "create"]
 
 ---
 
@@ -41,21 +41,24 @@ metadata:
   name: rook-obc-backup-tool
   namespace: rook-ceph
 data:
-  REMOTE_S3_HOST: "$S3_SERVER"
-  REMOTE_S3_BUCKET_SUFFIX: "$SUFFIX"
-  REMOTE_S3_BUCKET_PREFIX: "$PREFIX"
+  SOURCE_S3_URL: "https://source.example.com"
+  SOURCE_KUBECONFIG: "/source_kubeconfig"
+  TARGET_S3_URL: "https://target.example.com"
+  TARGET_KUBECONFIG: ""
+  TARGET_BUCKET_PREFIX: "prefix"
+  TARGET_BUCKET_NAMESPACE: "rook-ceph"
+  TARGET_STORAGE_CLASS_NAME: "spinning-rust"
 
 ---
 
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: rook-obc-backup-tool
+  name: rook-obc-backup-tool-source-kubeconfig
   namespace: rook-ceph
 data:
-  REMOTE_S3_ACCESS_KEY: "$ACCESS_KEY_ID"
-  REMOTE_S3_SECRET_KEY: "$SECRET_ACCESS_KEY"
-type: Opaque
+  kubeconfig: ""
+
 ---
 
 apiVersion: batch/v1beta1
@@ -74,14 +77,19 @@ spec:
         spec:
           serviceAccountName: rook-obc-backup-tool
           restartPolicy: OnFailure
+          volumes:
+            - name: source-kubeconfig
+              configMap:
+                name: rook-obc-backup-tool-source-kubeconfig
           containers:
             - name: backup
               image: deinstapel/rook-obc-backup:v1
+              volumeMounts:
+                - name: config-volume
+                  mountPath: /source_kubeconfig
               envFrom:
-              - secretRef:
-                  name: rook-obc-backup-tool
               - configMapRef:
                   name: rook-obc-backup-tool
-            
-          
+
+
 

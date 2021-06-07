@@ -83,10 +83,11 @@ spec:
                 name: rook-obc-backup-tool-source-kubeconfig
           containers:
             - name: backup
-              image: deinstapel/rook-obc-backup:v1
+              image: deinstapel/rook-obc-backup:v3
               volumeMounts:
                 - name: config-volume
                   mountPath: /source_kubeconfig
+                  subPath: kubeconfig
               envFrom:
               - configMapRef:
                   name: rook-obc-backup-tool

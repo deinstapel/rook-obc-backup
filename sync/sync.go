@@ -13,7 +13,6 @@ import (
 )
 
 const KEYS_PER_REQ = 1000
-const WORKERS = 4
 
 func PrepareSyncGroup(
 	ctx context.Context,
@@ -21,6 +20,7 @@ func PrepareSyncGroup(
 	sourceEndpoint string,
 	target *kubernetes.BucketDetails,
 	targetEndpoint string,
+	numWorkers int,
 ) (pipeline.Group, error) {
 
 	syncGroup := pipeline.NewGroup()
@@ -72,13 +72,13 @@ func PrepareSyncGroup(
 	syncGroup.AddPipeStep(pipeline.Step{
 		Name:       "LoadObjData",
 		Fn:         collection.LoadObjectData,
-		AddWorkers: WORKERS,
+		AddWorkers: uint(numWorkers),
 	})
 
 	syncGroup.AddPipeStep(pipeline.Step{
 		Name:       "UploadObj",
 		Fn:         collection.UploadObjectData,
-		AddWorkers: WORKERS,
+		AddWorkers: uint(numWorkers),
 	})
 
 	syncGroup.AddPipeStep(pipeline.Step{

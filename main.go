@@ -179,6 +179,7 @@ func backupOBC(ctx context.Context, objectBucketClaim kubernetes.ObjectBucketCla
 		env.SOURCE_S3_URL,
 		targetDetails,
 		env.TARGET_S3_URL,
+		env.NUM_WORKERS,
 	)
 
 	if err != nil {

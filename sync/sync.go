@@ -3,13 +3,14 @@ package sync
 import (
 	"context"
 	"errors"
+	"time"
+
 	"github.com/deinstapel/rook-obc-backup/kubernetes"
 	"github.com/larrabee/s3sync/pipeline"
 	"github.com/larrabee/s3sync/pipeline/collection"
 	"github.com/larrabee/s3sync/storage"
-	"github.com/larrabee/s3sync/storage/s3"
+	"github.com/larrabee/s3sync/storage/s3stream"
 	log "github.com/sirupsen/logrus"
-	"time"
 )
 
 const KEYS_PER_REQ = 1000
@@ -25,7 +26,7 @@ func PrepareSyncGroup(
 
 	syncGroup := pipeline.NewGroup()
 
-	sourceStorage := s3.NewS3Storage(
+	sourceStorage := s3stream.NewS3StreamStorage(
 		false,
 		source.AccessKeyId,
 		source.SecretAccessKey,
@@ -39,7 +40,7 @@ func PrepareSyncGroup(
 		0,
 	)
 
-	targetStorage := s3.NewS3Storage(
+	targetStorage := s3stream.NewS3StreamStorage(
 		false,
 		target.AccessKeyId,
 		target.SecretAccessKey,

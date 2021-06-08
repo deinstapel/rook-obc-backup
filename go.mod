@@ -9,3 +9,5 @@ require (
 	github.com/larrabee/s3sync v0.0.0-20210420145531-e73ac455ec31
 	github.com/sirupsen/logrus v1.7.0
 )
+
+replace github.com/larrabee/s3sync => github.com/deinstapel/s3sync v0.0.0-20210608132941-8afb113ed486

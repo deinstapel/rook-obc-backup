@@ -41,6 +41,9 @@ var AdvancedObjectFilter pipeline.StepFn = func(group *pipeline.Group, stepNum i
       continue
     }
     // Annotate the original ETag into metadata, so we will not need to copy it again
+    if obj.Metadata == nil {
+      obj.Metadata = make(map[string]*string)
+    }
     obj.Metadata["X-Original-ETag"] = obj.ETag
     output <- obj
 	}

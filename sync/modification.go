@@ -36,7 +36,7 @@ var AdvancedObjectFilter pipeline.StepFn = func(group *pipeline.Group, stepNum i
     // This happens for the case when the destination is uploaded in a different chunking than the original file
     // Therefore, we annotate the ETag into X-Original-ETag metadata and compare that again
 
-    if origETag, ok := destObj.Metadata["X-Original-ETag"]; ok && origETag != nil && *obj.ETag == *origETag {
+    if origETag, ok := destObj.Metadata["X-Original-Etag"]; ok && origETag != nil && *obj.ETag == *origETag {
       // Destination object has the same ETag set in its metadata
       continue
     }
@@ -55,7 +55,7 @@ var AnnotateETag pipeline.StepFn = func(group *pipeline.Group, stepNum int, inpu
       if obj.Metadata == nil {
         obj.Metadata = make(map[string]*string)
       }
-      obj.Metadata["X-Original-ETag"] = obj.ETag
+      obj.Metadata["X-Original-Etag"] = obj.ETag
     }
     output <- obj
   }

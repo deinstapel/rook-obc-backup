@@ -67,7 +67,7 @@ func PrepareSyncGroup(
 
 	syncGroup.AddPipeStep(pipeline.Step{
 		Name: "FilterObjectsModified",
-		Fn:   collection.FilterObjectsModified,
+		Fn:   AdvancedObjectFilter,
 	})
 
 	syncGroup.AddPipeStep(pipeline.Step{

@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/deinstapel/rook-obc-backup/kubernetes"
@@ -76,6 +77,11 @@ func PrepareSyncGroup(
 		AddWorkers: uint(numWorkers),
 	})
 
+  syncGroup.AddPipeStep(pipeline.Step{
+    Name:       "AnnotateETag",
+    Fn:         AnnotateETag,
+  })
+
 	syncGroup.AddPipeStep(pipeline.Step{
 		Name:       "UploadObj",
 		Fn:         collection.UploadObjectData,
@@ -91,6 +97,13 @@ func PrepareSyncGroup(
 }
 
 func printLiveStats(ctx context.Context, name string, syncGroup *pipeline.Group) {
+  sleeptime := 60 * time.Second
+  if stimeStr, ok := os.LookupEnv("STATS_INTERVAL"); ok {
+    if stime, err := time.ParseDuration(stimeStr); err == nil {
+      sleeptime = stime
+    }
+  }
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -109,7 +122,7 @@ func printLiveStats(ctx context.Context, name string, syncGroup *pipeline.Group)
 					"OutputObjSpeed": float64(val.Stats.Output) / dur,
 				}).Info("Current Group")
 			}
-			time.Sleep(60 * time.Second)
+			time.Sleep(sleeptime)
 		}
 	}
 }
@@ -140,41 +153,36 @@ func RunSyncGroup(ctx context.Context, name string, syncGroup pipeline.Group) er
 
 	go printLiveStats(ctx, name, &syncGroup)
 
-WaitLoop:
-	for {
-		select {
+	for err := range syncGroup.ErrChan() {
+    if err == nil {
+      break
+    }
 
-		case err := <-syncGroup.ErrChan():
-			if err == nil {
-				break WaitLoop
-			}
+    var confErr *pipeline.StepConfigurationError
+    if errors.As(err, &confErr) {
+      log.Errorf("Pipeline configuration error: %s, terminating", confErr)
+      return err
+    }
 
-			var confErr *pipeline.StepConfigurationError
-			if errors.As(err, &confErr) {
-				log.Errorf("Pipeline configuration error: %s, terminating", confErr)
-				return err
-			}
+    if storage.IsErrNotExist(err) {
+      var objErr *pipeline.ObjectError
+      if errors.As(err, &objErr) {
+        log.Warnf("Skip missing object: %s", *objErr.Object.Key)
+      } else {
+        log.Warnf("Skip missing object, err: %s", err)
+      }
+      continue
+    } else if storage.IsErrPermission(err) {
+      var objErr *pipeline.ObjectError
+      if errors.As(err, &objErr) {
+        log.Warnf("Skip permission denied object: %s", *objErr.Object.Key)
+      } else {
+        log.Warnf("Skip permission denied object, err: %s", err)
+      }
+      continue
+    }
 
-			if storage.IsErrNotExist(err) {
-				var objErr *pipeline.ObjectError
-				if errors.As(err, &objErr) {
-					log.Warnf("Skip missing object: %s", *objErr.Object.Key)
-				} else {
-					log.Warnf("Skip missing object, err: %s", err)
-				}
-				continue WaitLoop
-			} else if storage.IsErrPermission(err) {
-				var objErr *pipeline.ObjectError
-				if errors.As(err, &objErr) {
-					log.Warnf("Skip permission denied object: %s", *objErr.Object.Key)
-				} else {
-					log.Warnf("Skip permission denied object, err: %s", err)
-				}
-				continue WaitLoop
-			}
-
-			return err
-		}
+    return err
 	}
 
 	printFinalStats(name, &syncGroup)

@@ -40,11 +40,23 @@ var AdvancedObjectFilter pipeline.StepFn = func(group *pipeline.Group, stepNum i
       // Destination object has the same ETag set in its metadata
       continue
     }
-    // Annotate the original ETag into metadata, so we will not need to copy it again
-    if obj.Metadata == nil {
-      obj.Metadata = make(map[string]*string)
-    }
-    obj.Metadata["X-Original-ETag"] = obj.ETag
+
+    // We can't annotate the ETag here, because the metadata hasn't been loaded yet.
+
     output <- obj
 	}
+}
+
+var AnnotateETag pipeline.StepFn = func(group *pipeline.Group, stepNum int, input <-chan *storage.Object, output chan<- *storage.Object, errChan chan<- error) {
+  for obj := range input {
+
+    // Annotate the ETag into the original ETag
+    if obj.ETag != nil {
+      if obj.Metadata == nil {
+        obj.Metadata = make(map[string]*string)
+      }
+      obj.Metadata["X-Original-ETag"] = obj.ETag
+    }
+    output <- obj
+  }
 }

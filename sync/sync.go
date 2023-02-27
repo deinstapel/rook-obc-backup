@@ -37,8 +37,8 @@ func PrepareSyncGroup(
 		source.BucketName,
 		"",
 		KEYS_PER_REQ,
-		0,
-		0,
+		3,
+		1*time.Second,
 	)
 
 	targetStorage := s3stream.NewS3StreamStorage(
@@ -51,8 +51,8 @@ func PrepareSyncGroup(
 		target.BucketName,
 		"",
 		KEYS_PER_REQ,
-		0,
-		0,
+		3,
+		1*time.Second,
 	)
 
 	sourceStorage.WithContext(ctx)
@@ -67,9 +67,9 @@ func PrepareSyncGroup(
 	})
 
 	syncGroup.AddPipeStep(pipeline.Step{
-		Name: "FilterObjectsModified",
-		Fn:   AdvancedObjectFilter,
-    AddWorkers: uint(numWorkers),
+		Name:       "FilterObjectsModified",
+		Fn:         AdvancedObjectFilter,
+		AddWorkers: uint(numWorkers),
 	})
 
 	syncGroup.AddPipeStep(pipeline.Step{
@@ -78,10 +78,10 @@ func PrepareSyncGroup(
 		AddWorkers: uint(numWorkers),
 	})
 
-  syncGroup.AddPipeStep(pipeline.Step{
-    Name:       "AnnotateETag",
-    Fn:         AnnotateETag,
-  })
+	syncGroup.AddPipeStep(pipeline.Step{
+		Name: "AnnotateETag",
+		Fn:   AnnotateETag,
+	})
 
 	syncGroup.AddPipeStep(pipeline.Step{
 		Name:       "UploadObj",
@@ -98,12 +98,12 @@ func PrepareSyncGroup(
 }
 
 func printLiveStats(ctx context.Context, name string, syncGroup *pipeline.Group) {
-  sleeptime := 60 * time.Second
-  if stimeStr, ok := os.LookupEnv("STATS_INTERVAL"); ok {
-    if stime, err := time.ParseDuration(stimeStr); err == nil {
-      sleeptime = stime
-    }
-  }
+	sleeptime := 60 * time.Second
+	if stimeStr, ok := os.LookupEnv("STATS_INTERVAL"); ok {
+		if stime, err := time.ParseDuration(stimeStr); err == nil {
+			sleeptime = stime
+		}
+	}
 
 	for {
 		select {
@@ -119,8 +119,8 @@ func printLiveStats(ctx context.Context, name string, syncGroup *pipeline.Group)
 					"InputObj":       val.Stats.Input,
 					"OutputObj":      val.Stats.Output,
 					"ErrorObj":       val.Stats.Error,
-					"InputObjSpeed":  float64(val.Stats.Input) / dur,
-					"OutputObjSpeed": float64(val.Stats.Output) / dur,
+					"InputObjSpeed":  float64(val.Stats.Input.Load()) / dur,
+					"OutputObjSpeed": float64(val.Stats.Output.Load()) / dur,
 				}).Info("Current Group")
 			}
 			time.Sleep(sleeptime)
@@ -138,8 +138,8 @@ func printFinalStats(name string, syncGroup *pipeline.Group) {
 			"InputObj":       val.Stats.Input,
 			"OutputObj":      val.Stats.Output,
 			"ErrorObj":       val.Stats.Error,
-			"InputObjSpeed":  float64(val.Stats.Input) / dur,
-			"OutputObjSpeed": float64(val.Stats.Output) / dur,
+			"InputObjSpeed":  float64(val.Stats.Input.Load()) / dur,
+			"OutputObjSpeed": float64(val.Stats.Output.Load()) / dur,
 		}).Info("Pipeline step finished")
 	}
 	log.WithFields(log.Fields{
@@ -154,38 +154,41 @@ func RunSyncGroup(ctx context.Context, name string, syncGroup pipeline.Group) er
 
 	go printLiveStats(ctx, name, &syncGroup)
 
+	var lastErr error
+
 	for err := range syncGroup.ErrChan() {
-    if err == nil {
-      break
-    }
+		if err == nil {
+			break
+		}
 
-    var confErr *pipeline.StepConfigurationError
-    if errors.As(err, &confErr) {
-      log.Errorf("Pipeline configuration error: %s, terminating", confErr)
-      return err
-    }
+		var confErr *pipeline.StepConfigurationError
+		if errors.As(err, &confErr) {
+			log.Errorf("Pipeline configuration error: %s, terminating", confErr)
+			return err
+		}
 
-    if storage.IsErrNotExist(err) {
-      var objErr *pipeline.ObjectError
-      if errors.As(err, &objErr) {
-        log.Warnf("Skip missing object: %s", *objErr.Object.Key)
-      } else {
-        log.Warnf("Skip missing object, err: %s", err)
-      }
-      continue
-    } else if storage.IsErrPermission(err) {
-      var objErr *pipeline.ObjectError
-      if errors.As(err, &objErr) {
-        log.Warnf("Skip permission denied object: %s", *objErr.Object.Key)
-      } else {
-        log.Warnf("Skip permission denied object, err: %s", err)
-      }
-      continue
-    }
+		if storage.IsErrNotExist(err) {
+			var objErr *pipeline.ObjectError
+			if errors.As(err, &objErr) {
+				log.Warnf("Skip missing object: %s", *objErr.Object.Key)
+			} else {
+				log.Warnf("Skip missing object, err: %s", err)
+			}
+			continue
+		} else if storage.IsErrPermission(err) {
+			var objErr *pipeline.ObjectError
+			if errors.As(err, &objErr) {
+				log.Warnf("Skip permission denied object: %s", *objErr.Object.Key)
+			} else {
+				log.Warnf("Skip permission denied object, err: %s", err)
+			}
+			continue
+		}
 
-    return err
+		lastErr = err
+		log.Warnf("Skip error: %v", err)
 	}
 
 	printFinalStats(name, &syncGroup)
-	return nil
+	return lastErr
 }

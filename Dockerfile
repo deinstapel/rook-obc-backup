@@ -1,6 +1,5 @@
 # build stage
-FROM golang:1.13 as builder
-ENV GO111MODULE=on
+FROM golang:1.20 as builder
 
 WORKDIR /app
 
@@ -13,7 +12,7 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
 
-FROM alpine:3.11 as certs
+FROM alpine:3.17 as certs
 RUN apk add ca-certificates && update-ca-certificates
 
 # final stage

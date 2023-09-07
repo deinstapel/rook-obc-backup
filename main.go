@@ -4,17 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/deinstapel/rook-obc-backup/env"
-	"github.com/deinstapel/rook-obc-backup/kubernetes"
-	"github.com/deinstapel/rook-obc-backup/sync"
-	"github.com/ericchiang/k8s"
-	"github.com/ghodss/yaml"
-	log "github.com/sirupsen/logrus"
 	"io/ioutil"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/deinstapel/rook-obc-backup/env"
+	"github.com/deinstapel/rook-obc-backup/kubernetes"
+	"github.com/deinstapel/rook-obc-backup/sync"
+	"github.com/ericchiang/k8s"
+	"github.com/ghodss/yaml"
+	"github.com/larrabee/s3sync/storage"
+	log "github.com/sirupsen/logrus"
 )
 
 func init() {
@@ -115,7 +117,7 @@ func backupOBC(ctx context.Context, objectBucketClaim kubernetes.ObjectBucketCla
 	scopedLog := log.WithFields(log.Fields{
 		"sourceName":      *item.Metadata.Name,
 		"sourceNamespace": *item.Metadata.Namespace,
-		"targetName": targetBucketName,
+		"targetName":      targetBucketName,
 		"targetNamespace": env.TARGET_BUCKET_NAMESPACE,
 	})
 	scopedLog.Info("Working on Element")
@@ -142,7 +144,7 @@ func backupOBC(ctx context.Context, objectBucketClaim kubernetes.ObjectBucketCla
 	)
 
 	if err != nil {
-		return errors.New("Target namespace could not be checked")
+		return errors.New("target namespace could not be checked")
 	}
 
 	if !doesTargetNamespaceExist {
@@ -156,7 +158,7 @@ func backupOBC(ctx context.Context, objectBucketClaim kubernetes.ObjectBucketCla
 
 		if err != nil {
 			log.Errorf("Target object bucket claim could not be created, err: %v", err)
-			return errors.New("Target object bucket claim could not be created")
+			return errors.New("target object bucket claim could not be created")
 		}
 
 		time.Sleep(10 * time.Second)
@@ -173,28 +175,41 @@ func backupOBC(ctx context.Context, objectBucketClaim kubernetes.ObjectBucketCla
 		return errors.New("targetDetails could not be obtained")
 	}
 
-	syncGroup, err := sync.PrepareSyncGroup(
-		childCtx,
-		sourceDetails,
-		env.SOURCE_S3_URL,
-		targetDetails,
-		env.TARGET_S3_URL,
-		env.NUM_WORKERS,
-	)
+	var retryFiles []*storage.Object = nil
 
-	if err != nil {
-		return errors.New("Sync Group could not be prepared")
+	// Retry three times
+	for i := 0; i < 3; i++ {
+		if len(retryFiles) > 0 {
+			log.Printf("Retrying %d files", len(retryFiles))
+		}
+
+		syncGroup, err := sync.PrepareSyncGroup(
+			childCtx,
+			sourceDetails,
+			env.SOURCE_S3_URL,
+			targetDetails,
+			env.TARGET_S3_URL,
+			env.NUM_WORKERS,
+			retryFiles,
+		)
+
+		if err != nil {
+			return errors.New("sync Group could not be prepared")
+		}
+
+		retryFiles, err = sync.RunSyncGroup(
+			childCtx,
+			targetBucketName,
+			syncGroup,
+		)
+
+		if err != nil && len(retryFiles) > 0 {
+			continue
+		} else if err != nil {
+			return err
+		} else {
+			break
+		}
 	}
-
-	err = sync.RunSyncGroup(
-		childCtx,
-		targetBucketName,
-		syncGroup,
-	)
-
-	if err != nil {
-		return err
-	}
-
 	return nil
 }

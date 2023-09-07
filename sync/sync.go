@@ -16,6 +16,11 @@ import (
 
 const KEYS_PER_REQ = 1000
 
+type SyncGroup struct {
+	pipeline.Group
+	retryChan chan *storage.Object
+}
+
 func PrepareSyncGroup(
 	ctx context.Context,
 	source *kubernetes.BucketDetails,
@@ -23,7 +28,8 @@ func PrepareSyncGroup(
 	target *kubernetes.BucketDetails,
 	targetEndpoint string,
 	numWorkers int,
-) (pipeline.Group, error) {
+	retryFiles []*storage.Object,
+) (*SyncGroup, error) {
 
 	syncGroup := pipeline.NewGroup()
 
@@ -55,16 +61,26 @@ func PrepareSyncGroup(
 		1*time.Second,
 	)
 
+	retryChan := make(chan *storage.Object, 32)
+
 	sourceStorage.WithContext(ctx)
 
 	syncGroup.SetSource(sourceStorage)
 	syncGroup.SetTarget(targetStorage)
 
-	syncGroup.AddPipeStep(pipeline.Step{
-		Name:     "ListSource",
-		Fn:       collection.ListSourceStorage,
-		ChanSize: KEYS_PER_REQ,
-	})
+	if retryFiles == nil {
+		syncGroup.AddPipeStep(pipeline.Step{
+			Name:     "ListSource",
+			Fn:       collection.ListSourceStorage,
+			ChanSize: KEYS_PER_REQ,
+		})
+	} else {
+		syncGroup.AddPipeStep(pipeline.Step{
+			Name:     "ListRetryFiles",
+			Fn:       ListRetryFiles(retryFiles),
+			ChanSize: KEYS_PER_REQ,
+		})
+	}
 
 	syncGroup.AddPipeStep(pipeline.Step{
 		Name:       "FilterObjectsModified",
@@ -94,10 +110,13 @@ func PrepareSyncGroup(
 		Fn:   collection.Terminator,
 	})
 
-	return syncGroup, nil
+	return &SyncGroup{
+		Group:     syncGroup,
+		retryChan: retryChan,
+	}, nil
 }
 
-func printLiveStats(ctx context.Context, name string, syncGroup *pipeline.Group) {
+func printLiveStats(ctx context.Context, name string, syncGroup *SyncGroup) {
 	sleeptime := 60 * time.Second
 	if stimeStr, ok := os.LookupEnv("STATS_INTERVAL"); ok {
 		if stime, err := time.ParseDuration(stimeStr); err == nil {
@@ -128,7 +147,7 @@ func printLiveStats(ctx context.Context, name string, syncGroup *pipeline.Group)
 	}
 }
 
-func printFinalStats(name string, syncGroup *pipeline.Group) {
+func printFinalStats(name string, syncGroup *SyncGroup) {
 	dur := time.Since(syncGroup.StartTime).Seconds()
 	for _, val := range syncGroup.GetStepsInfo() {
 		log.WithFields(log.Fields{
@@ -148,11 +167,12 @@ func printFinalStats(name string, syncGroup *pipeline.Group) {
 
 }
 
-func RunSyncGroup(ctx context.Context, name string, syncGroup pipeline.Group) error {
+func RunSyncGroup(ctx context.Context, name string, syncGroup *SyncGroup) ([]*storage.Object, error) {
+	retryFiles := []*storage.Object{}
 
 	syncGroup.Run()
 
-	go printLiveStats(ctx, name, &syncGroup)
+	go printLiveStats(ctx, name, syncGroup)
 
 	var lastErr error
 
@@ -164,7 +184,13 @@ func RunSyncGroup(ctx context.Context, name string, syncGroup pipeline.Group) er
 		var confErr *pipeline.StepConfigurationError
 		if errors.As(err, &confErr) {
 			log.Errorf("Pipeline configuration error: %s, terminating", confErr)
-			return err
+			return nil, err
+		}
+		var objectErr *pipeline.ObjectError
+		if errors.As(err, &objectErr) {
+			log.Errorf("Failed downloading object: %s, retrying", *objectErr.Object.Key)
+			retryFiles = append(retryFiles, objectErr.Object)
+			continue
 		}
 
 		if storage.IsErrNotExist(err) {
@@ -189,6 +215,6 @@ func RunSyncGroup(ctx context.Context, name string, syncGroup pipeline.Group) er
 		log.Warnf("Skip error: %v", err)
 	}
 
-	printFinalStats(name, &syncGroup)
-	return lastErr
+	printFinalStats(name, syncGroup)
+	return retryFiles, lastErr
 }

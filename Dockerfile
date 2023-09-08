@@ -1,5 +1,5 @@
 # build stage
-FROM golang:1.20 as builder
+FROM golang:1.21 as builder
 
 WORKDIR /app
 
@@ -12,10 +12,10 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
 
-FROM alpine:3.17 as certs
+FROM alpine:3.18 as certs
 RUN apk add ca-certificates && update-ca-certificates
 
 # final stage
-FROM minio/mc
+FROM minio/mc:RELEASE.2023-09-07T22-48-55Z
 COPY --from=builder /app/rook-obc-backup /app/
 ENTRYPOINT ["/app/rook-obc-backup"]
